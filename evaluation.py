@@ -1,9 +1,9 @@
-import requests
 from PIL import Image
 import base64
 import io
 import json
 import os
+import requests
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -68,73 +68,28 @@ def evaluate_model(task_name, final_state_image_path):
     Format the response as a JSON with 'score' and 'feedback' fields.
     """
     
-    # Prepare the API request
-    headers = {
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-        'x-api-key': api_key,
-        'anthropic-beta': 'messages-2023-12-15',
+    # Prepare the request payload
+    payload = {
+        "task_name": task_name,
+        "image": {
+            "media_type": media_type,
+            "data": image_base64
+        },
+        "task_description": task_descriptions.get(task_name)
     }
     
-    data = {
-        'model': 'claude-2.1',
-        'max_tokens': 1000,
-        'messages': [{
-            'role': 'user',
-            'content': [
-                {
-                    'type': 'text',
-                    'text': prompt
-                },
-                {
-                    'type': 'image',
-                    'source': {
-                        'type': 'base64',
-                        'media_type': media_type,
-                        'data': image_base64
-                    }
-                }
-            ]
-        }]
-    }
-    
-    # Call Claude API directly using requests
     try:
-        response = requests.post(
-            'https://api.anthropic.com/v1/messages',
-            headers=headers,
-            json={
-                'model': 'claude-3-opus-20240229',
-                'max_tokens': 1000,
-                'messages': [{
-                    'role': 'user',
-                    'content': [
-                        {
-                            'type': 'text',
-                            'text': prompt
-                        },
-                        {
-                            'type': 'image',
-                            'source': {
-                                'type': 'base64',
-                                'media_type': media_type,
-                                'data': image_base64
-                            }
-                        }
-                    ]
-                }]
-            }
-        )
+        # Make request to local API server
+        response = requests.post("http://localhost:8000/evaluate", json=payload)
+        response.raise_for_status()  # Raise an exception for bad status codes
         
-        if response.status_code == 200:
-            response_data = response.json()
-            evaluation = json.loads(response_data['completion'])
-            return evaluation
-        else:
-            return {
-                "score": 0,
-                "feedback": f"API Error: {response.status_code} - {response.text}"
-            }
+        return response.json()
+        
+    except requests.RequestException as e:
+        return {
+            "score": 0,
+            "feedback": f"Error during evaluation: {str(e)}"
+        }
     except Exception as e:
         return {
             "score": 0,
