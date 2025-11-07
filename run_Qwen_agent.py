@@ -12,6 +12,8 @@ import torch
 from PIL import Image
 import io
 import base64
+import os
+from datetime import datetime
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 from qwen_vl_utils import process_vision_info
 
@@ -145,7 +147,7 @@ class QwenVLMAgent:
     Agent that uses Qwen2-VL-4B model to make decisions based on visual observations.
     """
     
-    def __init__(self, env, task_name, device="cuda", model_name="Qwen/Qwen2-VL-7B-Instruct"):
+    def __init__(self, env, task_name, device="cuda", model_name="Qwen/Qwen2-VL-7B-Instruct", log_file=None):
         """
         Initialize the QWEN VLM Agent.
         
@@ -154,6 +156,7 @@ class QwenVLMAgent:
             task_name: Name of the BASALT task
             device: Device to run the model on ('cuda' or 'cpu')
             model_name: Hugging Face model identifier for QWEN VLM
+            log_file: Path to log file for VLM responses (optional)
         """
         self.device = device
         self.task_name = task_name
@@ -161,6 +164,21 @@ class QwenVLMAgent:
         
         # Get task-specific prompts
         self.task_config = TASK_PROMPTS.get(task_name, TASK_PROMPTS["MineRLBasaltFindCave-v0"])
+        
+        # Setup logging
+        self.log_file = log_file
+        if self.log_file:
+            # Create logs directory if it doesn't exist
+            log_dir = os.path.dirname(self.log_file)
+            if log_dir and not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+            
+            # Initialize log file with header
+            with open(self.log_file, 'w') as f:
+                f.write(f"VLM Response Log - {task_name}\n")
+                f.write(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("="*80 + "\n\n")
+            print(f"Logging VLM responses to: {self.log_file}")
         
         # Load QWEN VLM model
         print(f"Loading QWEN VLM model: {model_name}")
@@ -175,6 +193,7 @@ class QwenVLMAgent:
         # Conversation history for context
         self.conversation_history = []
         self.step_count = 0
+        self.episode_count = 0
         
         print(f"QWEN VLM Agent initialized for task: {task_name}")
     
@@ -182,6 +201,52 @@ class QwenVLMAgent:
         """Reset the agent's conversation history."""
         self.conversation_history = []
         self.step_count = 0
+        self.episode_count += 1
+        
+        # Log episode start
+        if self.log_file:
+            with open(self.log_file, 'a') as f:
+                f.write(f"\n{'='*80}\n")
+                f.write(f"Episode {self.episode_count} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"{'='*80}\n\n")
+    
+    def _log_vlm_response(self, step, prompt, response_text, action):
+        """
+        Log VLM response to file.
+        
+        Args:
+            step: Current step number
+            prompt: The prompt sent to the VLM
+            response_text: The raw response from the VLM
+            action: The parsed MineRL action
+        """
+        if not self.log_file:
+            return
+        
+        try:
+            with open(self.log_file, 'a') as f:
+                f.write(f"--- Step {step} [{datetime.now().strftime('%H:%M:%S')}] ---\n")
+                f.write(f"\nPrompt:\n{prompt}\n")
+                f.write(f"\nVLM Response:\n{response_text}\n")
+                f.write(f"\nParsed Action:\n")
+                
+                # Log non-zero actions for readability
+                action_summary = []
+                for key, value in action.items():
+                    if key == 'camera':
+                        if not np.allclose(value, 0):
+                            action_summary.append(f"  {key}: [{value[0]:.2f}, {value[1]:.2f}]")
+                    elif value != 0:
+                        action_summary.append(f"  {key}: {value}")
+                
+                if action_summary:
+                    f.write("\n".join(action_summary) + "\n")
+                else:
+                    f.write("  (no action)\n")
+                
+                f.write("\n" + "-"*80 + "\n\n")
+        except Exception as e:
+            print(f"Warning: Failed to log VLM response: {e}")
     
     def _observation_to_image(self, obs):
         """
@@ -391,10 +456,13 @@ Keep your reasoning concise and focused on the immediate next action."""
         # Parse response into action
         action = self._parse_vlm_response(response_text)
         
+        # Log the VLM response
+        self._log_vlm_response(self.step_count, text_prompt, response_text, action)
+        
         return action
 
 
-def main(env, task_name, n_episodes=3, max_steps=int(1e9), show=False, device="cuda"):
+def main(env, task_name, n_episodes=3, max_steps=int(1e9), show=False, device="cuda", log_file=None):
     """
     Main function to run the QWEN VLM agent on a MineRL BASALT task.
     
@@ -405,12 +473,13 @@ def main(env, task_name, n_episodes=3, max_steps=int(1e9), show=False, device="c
         max_steps: Maximum steps per episode
         show: Whether to render the environment
         device: Device to run the model on
+        log_file: Path to log file for VLM responses (optional)
     """
     # Using aicrowd_gym is important! Your submission will not work otherwise
     env = aicrowd_gym.make(task_name)
     
     # Initialize QWEN VLM agent
-    agent = QwenVLMAgent(env, task_name, device=device)
+    agent = QwenVLMAgent(env, task_name, device=device, log_file=log_file)
     
     print(f"\n{'='*60}")
     print(f"Running QWEN VLM Agent on {task_name}")
@@ -492,8 +561,20 @@ if __name__ == "__main__":
         default="Qwen/Qwen2-VL-7B-Instruct",
         help="Hugging Face model name for QWEN VLM (use Qwen2-VL-2B-Instruct for 4B param model)"
     )
+    parser.add_argument(
+        "--log_file",
+        type=str,
+        default=None,
+        help="Path to log file for VLM responses (default: logs/vlm_responses_<timestamp>.txt)"
+    )
     
     args = parser.parse_args()
+    
+    # Create default log file if not specified
+    log_file = args.log_file
+    if log_file is None:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_file = f"logs/vlm_responses_{timestamp}.txt"
     
     main(
         env=args.env,
@@ -501,5 +582,6 @@ if __name__ == "__main__":
         n_episodes=args.n_episodes,
         max_steps=args.max_steps,
         show=args.show,
-        device=args.device
+        device=args.device,
+        log_file=log_file
     )
