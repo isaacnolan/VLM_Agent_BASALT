@@ -82,50 +82,27 @@ Based on the current observation, decide what action to take.""",
     }
 }
 
-ACTION_PROMPT_TEMPLATE = """Analyze the image and decide the best action:
+ACTION_PROMPT_TEMPLATE = """You are controlling a Minecraft character. Plan the next {n_steps} actions.
 
-Actions available:
-- forward/back: Move forward or backward (0 or 1)
-- left/right: Strafe left or right (0 or 1)
-- jump: Jump (0 or 1)
-- sneak: Crouch/sneak (0 or 1)
-- sprint: Sprint (0 or 1)
-- attack: Break blocks (0 or 1)
-- use: Place blocks or use items (0 or 1)
-- drop: Drop items (0 or 1)
-- inventory: Open inventory (0 or 1)
-- camera: Look around [horizontal_angle, vertical_angle] in degrees
-- hotbar.1 through hotbar.9: Select hotbar slot (0 or 1)
+Available actions (use 0 or 1 for each):
+forward, back, left, right, jump, sneak, sprint, attack, use, drop, inventory
+camera: [horizontal_degrees, vertical_degrees]
+hotbar.1 through hotbar.9: select inventory slot
 
-Respond in JSON format:
-{
-    "reasoning": "Brief explanation of what you see and why you chose this action",
-    "action": {
-        "forward": 0 or 1,
-        "back": 0 or 1,
-        "left": 0 or 1,
-        "right": 0 or 1,
-        "jump": 0 or 1,
-        "sneak": 0 or 1,
-        "sprint": 0 or 1,
-        "attack": 0 or 1,
-        "use": 0 or 1,
-        "drop": 0 or 1,
-        "inventory": 0 or 1,
-        "camera": [horizontal_angle, vertical_angle],
-        "hotbar.1": 0 or 1,
-        "hotbar.2": 0 or 1,
-        "hotbar.3": 0 or 1,
-        "hotbar.4": 0 or 1,
-        "hotbar.5": 0 or 1,
-        "hotbar.6": 0 or 1,
-        "hotbar.7": 0 or 1,
-        "hotbar.8": 0 or 1,
-        "hotbar.9": 0 or 1
-    }
-}
+Respond with valid JSON in this EXACT format (start with {{ not [):
+{{
+  "reasoning": "your overall plan",
+  "actions": [
+    {{"step_reasoning": "step 1 plan", "action": {{"forward": 1, "camera": [0, 0]}}}},
+    {{"step_reasoning": "step 2 plan", "action": {{"forward": 1, "camera": [0, 0]}}}}
+  ]
+}}
 
-Keep your reasoning concise and focused on the immediate next action."""
+CRITICAL: 
+- Start with {{ not [
+- Include "reasoning" field
+- Include "actions" array with {n_steps} items
+- No extra text before or after the JSON"""
 
 
 class ImageData(BaseModel):
@@ -136,11 +113,13 @@ class PolicyRequest(BaseModel):
     image: ImageData
     step: Optional[int] = 0
     temperature: Optional[float] = 0.7
-    max_tokens: Optional[int] = 512
+    max_tokens: Optional[int] = 1024
+    n_steps: Optional[int] = 5  # Number of steps to plan ahead
 
 class ActionResponse(BaseModel):
-    action: Dict[str, Any]
+    actions: List[Dict[str, Any]]  # List of actions for multiple steps
     reasoning: str
+    step_reasonings: List[str]  # Reasoning for each step
     step: int
 
 @app.on_event("startup")
@@ -154,17 +133,22 @@ async def load_model():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}")
     
-    # Load model - using 2B model for faster inference
-    model_name = "Qwen/Qwen2-VL-2B-Instruct"
+    # Load model - using 7B model for better performance
+    model_name = "Qwen/Qwen2-VL-7B-Instruct"
     
     try:
+        # Clear CUDA cache if available
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        
         model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
             device_map="auto" if device == "cuda" else None,
+            trust_remote_code=True,
         )
         
-        processor = AutoProcessor.from_pretrained(model_name)
+        processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
         
         logger.info(f"Successfully loaded {model_name}")
         logger.info("QWEN VLM Policy Server ready!")
@@ -188,7 +172,7 @@ async def health_check():
     """Detailed health check."""
     return {
         "status": "healthy" if model is not None else "unhealthy",
-        "model": "Qwen2-VL-2B-Instruct",
+        "model": "Qwen2-VL-7B-Instruct",
         "device": device,
         "ready": model is not None and processor is not None
     }
@@ -233,12 +217,13 @@ async def get_action(request: PolicyRequest):
             TASK_PROMPTS["MineRLBasaltFindCave-v0"]
         )
         
-        # Construct prompt
+        # Construct prompt with n_steps
+        n_steps = request.n_steps if request.n_steps > 0 else 5
         text_prompt = f"""Step {request.step}
 
 {task_config['task_description']}
 
-{ACTION_PROMPT_TEMPLATE}"""
+{ACTION_PROMPT_TEMPLATE.format(n_steps=n_steps)}"""
         
         # Prepare messages for the VLM
         messages = [
@@ -301,12 +286,13 @@ async def get_action(request: PolicyRequest):
         
         logger.info(f"VLM Response: {response_text[:200]}...")
         
-        # Parse the response
-        action_dict, reasoning = parse_vlm_response(response_text)
+        # Parse the response for multiple steps
+        actions_list, reasoning, step_reasonings = parse_vlm_response_multi_step(response_text, request.n_steps)
         
         return ActionResponse(
-            action=action_dict,
+            actions=actions_list,
             reasoning=reasoning,
+            step_reasonings=step_reasonings,
             step=request.step
         )
         
@@ -333,47 +319,81 @@ def parse_vlm_response(response_text: str):
         # Try to extract JSON from the response
         import re
         json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-        if json_match:
-            response_json = json.loads(json_match.group())
-        else:
+        if not json_match:
             raise ValueError("No JSON found in response")
-        
+
+        raw_json = json_match.group()
+        logger.info(f"Raw JSON extracted from VLM:\n{raw_json}")
+
+        # Clean up common non-JSON tokens that the model sometimes emits
+        clean = raw_json
+        # Replace constructs like: "forward": 0 or 1  -> choose 1 (model usually means the action is possible)
+        clean = re.sub(r'(?P<key>"[a-zA-Z0-9_.]+"\s*:\s*)(?:0\s*or\s*1|1\s*or\s*0)', r"\g<key>1", clean)
+        # Replace boolean-like words (True/False) with JSON booleans
+        clean = re.sub(r"\bTrue\b", "true", clean)
+        clean = re.sub(r"\bFalse\b", "false", clean)
+        # Replace single quotes with double quotes (if any)
+        clean = clean.replace("\'", '"')
+        # Remove trailing commas before closing braces/brackets
+        clean = re.sub(r",\s*(\}|\])", r"\1", clean)
+
+        logger.info(f"Cleaned JSON to parse:\n{clean}")
+
+        response_json = json.loads(clean)
+
         # Extract action and reasoning
         action_dict = response_json.get('action', {})
         reasoning = response_json.get('reasoning', 'No reasoning provided')
-        
+
         # Create MineRL action format with all required fields
+        def to_int_or_zero(val):
+            try:
+                return int(val)
+            except Exception:
+                # if val is a list/tuple (camera), handled elsewhere
+                return 0
+
         minerl_action = {
-            'attack': int(action_dict.get('attack', 0)),
-            'back': int(action_dict.get('back', 0)),
-            'forward': int(action_dict.get('forward', 0)),
-            'jump': int(action_dict.get('jump', 0)),
-            'left': int(action_dict.get('left', 0)),
-            'right': int(action_dict.get('right', 0)),
-            'sneak': int(action_dict.get('sneak', 0)),
-            'sprint': int(action_dict.get('sprint', 0)),
-            'use': int(action_dict.get('use', 0)),
-            'drop': int(action_dict.get('drop', 0)),
-            'inventory': int(action_dict.get('inventory', 0)),
-            'hotbar.1': int(action_dict.get('hotbar.1', 0)),
-            'hotbar.2': int(action_dict.get('hotbar.2', 0)),
-            'hotbar.3': int(action_dict.get('hotbar.3', 0)),
-            'hotbar.4': int(action_dict.get('hotbar.4', 0)),
-            'hotbar.5': int(action_dict.get('hotbar.5', 0)),
-            'hotbar.6': int(action_dict.get('hotbar.6', 0)),
-            'hotbar.7': int(action_dict.get('hotbar.7', 0)),
-            'hotbar.8': int(action_dict.get('hotbar.8', 0)),
-            'hotbar.9': int(action_dict.get('hotbar.9', 0)),
+            'attack': to_int_or_zero(action_dict.get('attack', 0)),
+            'back': to_int_or_zero(action_dict.get('back', 0)),
+            'forward': to_int_or_zero(action_dict.get('forward', 0)),
+            'jump': to_int_or_zero(action_dict.get('jump', 0)),
+            'left': to_int_or_zero(action_dict.get('left', 0)),
+            'right': to_int_or_zero(action_dict.get('right', 0)),
+            'sneak': to_int_or_zero(action_dict.get('sneak', 0)),
+            'sprint': to_int_or_zero(action_dict.get('sprint', 0)),
+            'use': to_int_or_zero(action_dict.get('use', 0)),
+            'drop': to_int_or_zero(action_dict.get('drop', 0)),
+            'inventory': to_int_or_zero(action_dict.get('inventory', 0)),
+            'hotbar.1': to_int_or_zero(action_dict.get('hotbar.1', 0)),
+            'hotbar.2': to_int_or_zero(action_dict.get('hotbar.2', 0)),
+            'hotbar.3': to_int_or_zero(action_dict.get('hotbar.3', 0)),
+            'hotbar.4': to_int_or_zero(action_dict.get('hotbar.4', 0)),
+            'hotbar.5': to_int_or_zero(action_dict.get('hotbar.5', 0)),
+            'hotbar.6': to_int_or_zero(action_dict.get('hotbar.6', 0)),
+            'hotbar.7': to_int_or_zero(action_dict.get('hotbar.7', 0)),
+            'hotbar.8': to_int_or_zero(action_dict.get('hotbar.8', 0)),
+            'hotbar.9': to_int_or_zero(action_dict.get('hotbar.9', 0)),
             'camera': action_dict.get('camera', [0.0, 0.0]),
             'ESC': 0,
         }
-        
+
+        # Ensure camera is numeric
+        cam = minerl_action['camera']
+        try:
+            if isinstance(cam, (list, tuple)):
+                minerl_action['camera'] = [float(cam[0]), float(cam[1])]
+            else:
+                minerl_action['camera'] = [0.0, 0.0]
+        except Exception:
+            minerl_action['camera'] = [0.0, 0.0]
+
         return minerl_action, reasoning
-        
+
     except Exception as e:
         logger.error(f"Error parsing VLM response: {e}")
         logger.error(f"Response text: {response_text}")
-        
+
         # Return a safe default action
         default_action = {
             'attack': 0,
@@ -399,8 +419,265 @@ def parse_vlm_response(response_text: str):
             'camera': [0.0, 0.0],
             'ESC': 0,
         }
-        
+
         return default_action, f"Error parsing response: {str(e)}"
+
+
+def parse_vlm_response_multi_step(response_text: str, n_steps: int):
+    """
+    Parse the VLM's JSON response for multiple steps into action list and reasoning.
+    
+    Args:
+        response_text: Text response from the VLM
+        n_steps: Expected number of steps
+        
+    Returns:
+        Tuple of (actions_list, overall_reasoning, step_reasonings)
+    """
+    try:
+        # Try to extract JSON from the response
+        import re
+        
+        # First try to find JSON object
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        
+        # If not found, try to find JSON array (VLM sometimes returns array directly)
+        if not json_match:
+            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            if not json_match:
+                raise ValueError("No JSON found in response")
+            is_array = True
+        else:
+            is_array = False
+
+        raw_json = json_match.group()
+        logger.info(f"Raw JSON extracted from VLM (is_array={is_array}):\n{raw_json[:500]}...")
+
+        # Clean up common non-JSON tokens
+        clean = raw_json
+        clean = re.sub(r'(?P<key>"[a-zA-Z0-9_.]+"\s*:\s*)(?:0\s*or\s*1|1\s*or\s*0)', r"\g<key>1", clean)
+        clean = re.sub(r"\bTrue\b", "true", clean)
+        clean = re.sub(r"\bFalse\b", "false", clean)
+        clean = clean.replace("\'", '"')
+        # Remove trailing commas before closing braces/brackets
+        clean = re.sub(r",\s*(\}|\])", r"\1", clean)
+        # Remove duplicate commas
+        clean = re.sub(r",\s*,", ",", clean)
+        # Fix missing commas between properties (common VLM mistake)
+        clean = re.sub(r'([0-9\]\}])\s*\n\s*"', r'\1,\n"', clean)
+        # Remove comments (sometimes VLMs add them)
+        clean = re.sub(r'//.*$', '', clean, flags=re.MULTILINE)
+
+        logger.info(f"Cleaned JSON to parse:\n{clean[:500]}...")
+
+        try:
+            response_json = json.loads(clean)
+        except json.JSONDecodeError as json_err:
+            logger.error(f"JSON decode error: {json_err}")
+            logger.error(f"Failed JSON (first 1000 chars):\n{clean[:1000]}")
+            
+            # Try even more aggressive cleaning
+            # Extract just the actions array if possible
+            actions_match = re.search(r'"actions"\s*:\s*\[(.*?)\]', clean, re.DOTALL)
+            if actions_match:
+                logger.info("Attempting to extract just the actions array")
+                actions_str = "[" + actions_match.group(1) + "]"
+                try:
+                    actions_array = json.loads(actions_str)
+                    response_json = {"actions": actions_array, "reasoning": "Partially recovered from malformed JSON"}
+                except:
+                    raise json_err
+            else:
+                raise json_err
+
+        # Handle case where VLM returns array directly instead of object with "actions" key
+        if is_array and isinstance(response_json, list):
+            logger.info("VLM returned array directly, wrapping in proper structure")
+            actions_data = response_json
+            overall_reasoning = "Actions returned as array"
+        else:
+            # Extract overall reasoning
+            overall_reasoning = response_json.get('reasoning', 'No reasoning provided')
+            
+            # Extract actions list
+            actions_data = response_json.get('actions', [])
+        
+        if not actions_data:
+            # Fallback: maybe it's single-step format
+            if 'action' in response_json:
+                actions_data = [{'action': response_json['action'], 'step_reasoning': overall_reasoning}]
+            else:
+                logger.warning(f"No 'actions' or 'action' found in response JSON: {response_json}")
+                # Try to find any action-like data
+                for key in response_json:
+                    if isinstance(response_json[key], dict) and 'forward' in response_json[key]:
+                        actions_data = [{'action': response_json[key], 'step_reasoning': overall_reasoning}]
+                        logger.info(f"Found action data under key '{key}'")
+                        break
+        
+        # Parse each action
+        actions_list = []
+        step_reasonings = []
+        
+        for i, action_data in enumerate(actions_data[:n_steps]):  # Limit to n_steps
+            # Handle both dict with 'action' key and direct action dict
+            if isinstance(action_data, dict):
+                if 'action' in action_data:
+                    action_dict = action_data.get('action', {})
+                    step_reasoning = action_data.get('step_reasoning', f'Step {i+1}')
+                else:
+                    # Maybe the whole thing is an action
+                    action_dict = action_data
+                    step_reasoning = f'Step {i+1}'
+            else:
+                logger.warning(f"Unexpected action_data type: {type(action_data)}")
+                action_dict = {}
+                step_reasoning = f'Step {i+1} - error'
+            
+            step_reasonings.append(step_reasoning)
+            
+            # Create MineRL action format
+            minerl_action = create_minerl_action(action_dict)
+            actions_list.append(minerl_action)
+        
+        # If we got fewer actions than requested, repeat the last action
+        while len(actions_list) < n_steps:
+            if actions_list:
+                actions_list.append(actions_list[-1].copy())
+                step_reasonings.append("Continuing previous action")
+            else:
+                # No valid actions found at all - create exploration actions
+                logger.warning("No valid actions parsed, creating default exploration actions")
+                actions_list.append(get_exploration_action())
+                step_reasonings.append("Default exploration action")
+        
+        logger.info(f"Successfully parsed {len(actions_list)} actions")
+        return actions_list, overall_reasoning, step_reasonings
+
+    except Exception as e:
+        logger.error(f"Error parsing multi-step VLM response: {e}")
+        logger.error(f"Response text: {response_text}")
+
+        # Return default actions for all steps
+        default_action = get_default_minerl_action()
+        actions_list = [default_action.copy() for _ in range(n_steps)]
+        step_reasonings = [f"Error parsing response: {str(e)}"] * n_steps
+        
+        return actions_list, f"Error parsing response: {str(e)}", step_reasonings
+
+
+def create_minerl_action(action_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a MineRL-formatted action from a dictionary.
+    
+    Handles partial action dicts by filling in missing keys with defaults.
+    """
+    def to_int_or_zero(val):
+        try:
+            return int(val)
+        except Exception:
+            return 0
+
+    # Start with all defaults
+    minerl_action = {
+        'attack': 0,
+        'back': 0,
+        'forward': 0,
+        'jump': 0,
+        'left': 0,
+        'right': 0,
+        'sneak': 0,
+        'sprint': 0,
+        'use': 0,
+        'drop': 0,
+        'inventory': 0,
+        'hotbar.1': 0,
+        'hotbar.2': 0,
+        'hotbar.3': 0,
+        'hotbar.4': 0,
+        'hotbar.5': 0,
+        'hotbar.6': 0,
+        'hotbar.7': 0,
+        'hotbar.8': 0,
+        'hotbar.9': 0,
+        'camera': [0.0, 0.0],
+        'ESC': 0,
+    }
+    
+    # Update with provided values
+    if not action_dict:
+        return minerl_action
+    
+    for key in minerl_action.keys():
+        if key == 'camera':
+            cam = action_dict.get('camera', [0.0, 0.0])
+            try:
+                if isinstance(cam, (list, tuple)) and len(cam) >= 2:
+                    minerl_action['camera'] = [float(cam[0]), float(cam[1])]
+                else:
+                    minerl_action['camera'] = [0.0, 0.0]
+            except:
+                minerl_action['camera'] = [0.0, 0.0]
+        elif key in action_dict:
+            minerl_action[key] = to_int_or_zero(action_dict[key])
+
+    return minerl_action
+
+
+def get_default_minerl_action() -> Dict[str, Any]:
+    """Return a default 'do nothing' MineRL action."""
+    return {
+        'attack': 0,
+        'back': 0,
+        'forward': 0,
+        'jump': 0,
+        'left': 0,
+        'right': 0,
+        'sneak': 0,
+        'sprint': 0,
+        'use': 0,
+        'drop': 0,
+        'inventory': 0,
+        'hotbar.1': 0,
+        'hotbar.2': 0,
+        'hotbar.3': 0,
+        'hotbar.4': 0,
+        'hotbar.5': 0,
+        'hotbar.6': 0,
+        'hotbar.7': 0,
+        'hotbar.8': 0,
+        'hotbar.9': 0,
+        'camera': [0.0, 0.0],
+        'ESC': 0,
+    }
+
+
+def get_exploration_action() -> Dict[str, Any]:
+    """Return a basic exploration action (move forward and look around)."""
+    return {
+        'attack': 0,
+        'back': 0,
+        'forward': 1,
+        'jump': 0,
+        'left': 0,
+        'right': 0,
+        'sneak': 0,
+        'sprint': 0,
+        'use': 0,
+        'drop': 0,
+        'inventory': 0,
+        'hotbar.1': 0,
+        'hotbar.2': 0,
+        'hotbar.3': 0,
+        'hotbar.4': 0,
+        'hotbar.5': 0,
+        'hotbar.6': 0,
+        'hotbar.7': 0,
+        'hotbar.8': 0,
+        'hotbar.9': 0,
+        'camera': [0.0, 0.0],
+        'ESC': 0,
+    }
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")
