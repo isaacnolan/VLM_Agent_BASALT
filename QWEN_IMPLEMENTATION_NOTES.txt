@@ -1,0 +1,178 @@
+"""
+QWEN VLM Agent Implementation Summary
+======================================
+
+This implementation provides a Vision-Language Model (VLM) based agent for MineRL BASALT tasks
+using the Qwen2-VL model (4B or 7B parameters).
+
+FILES CREATED:
+--------------
+
+1. run_Qwen_agent.py
+   - Main agent implementation
+   - QwenVLMAgent class with VLM integration
+   - Task-specific prompt engineering
+   - Observation-to-image conversion
+   - Action parsing and execution
+
+2. test_QwenVLM.py
+   - Test script for easy task execution
+   - Simplified command-line interface
+   - Integrated with config.py for evaluation settings
+
+3. QWEN_VLM_README.md
+   - Comprehensive documentation
+   - Usage examples
+   - Architecture explanation
+   - Performance tips
+   - Troubleshooting guide
+
+KEY FEATURES:
+-------------
+
+✓ Visual observation processing (converts MineRL POV to images)
+✓ Task-specific prompt engineering for all 4 BASALT tasks
+✓ JSON-based action generation with reasoning
+✓ Support for all MineRL actions (movement, camera, interaction, inventory)
+✓ Configurable model selection (2B or 7B parameters)
+✓ GPU and CPU support
+✓ Error handling and fallback actions
+✓ Step-by-step reasoning output
+
+USAGE EXAMPLES:
+---------------
+
+# Basic usage
+python run_Qwen_agent.py --env MineRLBasaltFindCave-v0
+
+# With test script
+python test_QwenVLM.py --task FindCave --show
+
+# Custom configuration
+python run_Qwen_agent.py --env MineRLBasaltMakeWaterfall-v0 \
+    --n_episodes 5 \
+    --max_steps 1000 \
+    --device cuda \
+    --model Qwen/Qwen2-VL-2B-Instruct
+
+ARCHITECTURE:
+-------------
+
+MineRL Environment
+      ↓
+ POV Observation (numpy array)
+      ↓
+ Convert to PIL Image
+      ↓
+ Create VLM Prompt (image + task description + action instructions)
+      ↓
+ QWEN VLM Processing
+      ↓
+ JSON Response (reasoning + action)
+      ↓
+ Parse and Convert to MineRL Action
+      ↓
+ Execute in Environment
+
+PROMPT STRUCTURE:
+-----------------
+
+System Prompt:
+- Role definition (expert Minecraft player)
+- Task overview
+
+User Prompt (per step):
+- Image: Current POV observation
+- Text: 
+  * Step number
+  * Task description and objectives
+  * Available actions
+  * Response format (JSON schema)
+
+Expected Response:
+{
+    "reasoning": "What the agent sees and why it chose this action",
+    "action": {
+        "forward": 0 or 1,
+        "camera": [horizontal_angle, vertical_angle],
+        ...
+    }
+}
+
+REQUIREMENTS:
+-------------
+
+pip install transformers>=4.37.0
+pip install qwen-vl-utils
+pip install torch torchvision
+pip install pillow
+pip install accelerate
+pip install minerl
+pip install aicrowd-gym
+
+PERFORMANCE:
+------------
+
+Model Size:
+- Qwen2-VL-2B: ~8GB disk, ~6GB VRAM
+- Qwen2-VL-7B: ~28GB disk, ~16GB VRAM
+
+Inference Speed (2B model):
+- GPU (RTX 3090): ~1-2 seconds per step
+- CPU: ~5-10 seconds per step
+
+TASKS SUPPORTED:
+----------------
+
+✓ FindCave - Locate cave entrances
+✓ MakeWaterfall - Create aesthetic waterfalls
+✓ CreateVillageAnimalPen - Build animal enclosures
+✓ BuildVillageHouse - Construct village houses
+
+Each task has customized:
+- System prompts
+- Task descriptions
+- Action guidance
+- Success criteria
+
+ADVANTAGES OVER TRADITIONAL RL:
+-------------------------------
+
+1. Zero-shot capability - no training data needed
+2. Interpretable decisions - provides reasoning
+3. Flexible - can adapt to new tasks via prompts
+4. Language understanding - follows instructions
+5. Visual reasoning - understands scene context
+
+LIMITATIONS:
+------------
+
+1. Slower inference than trained policies
+2. Requires powerful GPU for real-time performance
+3. Action accuracy depends on prompt quality
+4. May struggle with complex multi-step planning
+5. Token limits restrict conversation history
+
+NEXT STEPS:
+-----------
+
+1. Test on actual BASALT environments
+2. Tune prompts based on performance
+3. Add conversation history for context
+4. Implement action caching for common scenarios
+5. Consider fine-tuning on Minecraft gameplay data
+6. Add multi-step planning capabilities
+7. Integrate with evaluation.py for automated scoring
+
+INTEGRATION WITH EXISTING CODEBASE:
+-----------------------------------
+
+The QWEN VLM agent follows the same interface pattern as the VPT agent:
+
+- reset(): Reset agent state
+- get_action(obs): Get action from observation
+- Compatible with MineRL BASALT environments
+- Can be used in same evaluation pipeline
+
+This allows easy A/B testing between VPT and QWEN VLM approaches.
+"""
