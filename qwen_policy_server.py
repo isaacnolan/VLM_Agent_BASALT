@@ -333,47 +333,81 @@ def parse_vlm_response(response_text: str):
         # Try to extract JSON from the response
         import re
         json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-        if json_match:
-            response_json = json.loads(json_match.group())
-        else:
+        if not json_match:
             raise ValueError("No JSON found in response")
-        
+
+        raw_json = json_match.group()
+        logger.info(f"Raw JSON extracted from VLM:\n{raw_json}")
+
+        # Clean up common non-JSON tokens that the model sometimes emits
+        clean = raw_json
+        # Replace constructs like: "forward": 0 or 1  -> choose 1 (model usually means the action is possible)
+        clean = re.sub(r'(?P<key>"[a-zA-Z0-9_.]+"\s*:\s*)(?:0\s*or\s*1|1\s*or\s*0)', r"\g<key>1", clean)
+        # Replace boolean-like words (True/False) with JSON booleans
+        clean = re.sub(r"\bTrue\b", "true", clean)
+        clean = re.sub(r"\bFalse\b", "false", clean)
+        # Replace single quotes with double quotes (if any)
+        clean = clean.replace("\'", '"')
+        # Remove trailing commas before closing braces/brackets
+        clean = re.sub(r",\s*(\}|\])", r"\1", clean)
+
+        logger.info(f"Cleaned JSON to parse:\n{clean}")
+
+        response_json = json.loads(clean)
+
         # Extract action and reasoning
         action_dict = response_json.get('action', {})
         reasoning = response_json.get('reasoning', 'No reasoning provided')
-        
+
         # Create MineRL action format with all required fields
+        def to_int_or_zero(val):
+            try:
+                return int(val)
+            except Exception:
+                # if val is a list/tuple (camera), handled elsewhere
+                return 0
+
         minerl_action = {
-            'attack': int(action_dict.get('attack', 0)),
-            'back': int(action_dict.get('back', 0)),
-            'forward': int(action_dict.get('forward', 0)),
-            'jump': int(action_dict.get('jump', 0)),
-            'left': int(action_dict.get('left', 0)),
-            'right': int(action_dict.get('right', 0)),
-            'sneak': int(action_dict.get('sneak', 0)),
-            'sprint': int(action_dict.get('sprint', 0)),
-            'use': int(action_dict.get('use', 0)),
-            'drop': int(action_dict.get('drop', 0)),
-            'inventory': int(action_dict.get('inventory', 0)),
-            'hotbar.1': int(action_dict.get('hotbar.1', 0)),
-            'hotbar.2': int(action_dict.get('hotbar.2', 0)),
-            'hotbar.3': int(action_dict.get('hotbar.3', 0)),
-            'hotbar.4': int(action_dict.get('hotbar.4', 0)),
-            'hotbar.5': int(action_dict.get('hotbar.5', 0)),
-            'hotbar.6': int(action_dict.get('hotbar.6', 0)),
-            'hotbar.7': int(action_dict.get('hotbar.7', 0)),
-            'hotbar.8': int(action_dict.get('hotbar.8', 0)),
-            'hotbar.9': int(action_dict.get('hotbar.9', 0)),
+            'attack': to_int_or_zero(action_dict.get('attack', 0)),
+            'back': to_int_or_zero(action_dict.get('back', 0)),
+            'forward': to_int_or_zero(action_dict.get('forward', 0)),
+            'jump': to_int_or_zero(action_dict.get('jump', 0)),
+            'left': to_int_or_zero(action_dict.get('left', 0)),
+            'right': to_int_or_zero(action_dict.get('right', 0)),
+            'sneak': to_int_or_zero(action_dict.get('sneak', 0)),
+            'sprint': to_int_or_zero(action_dict.get('sprint', 0)),
+            'use': to_int_or_zero(action_dict.get('use', 0)),
+            'drop': to_int_or_zero(action_dict.get('drop', 0)),
+            'inventory': to_int_or_zero(action_dict.get('inventory', 0)),
+            'hotbar.1': to_int_or_zero(action_dict.get('hotbar.1', 0)),
+            'hotbar.2': to_int_or_zero(action_dict.get('hotbar.2', 0)),
+            'hotbar.3': to_int_or_zero(action_dict.get('hotbar.3', 0)),
+            'hotbar.4': to_int_or_zero(action_dict.get('hotbar.4', 0)),
+            'hotbar.5': to_int_or_zero(action_dict.get('hotbar.5', 0)),
+            'hotbar.6': to_int_or_zero(action_dict.get('hotbar.6', 0)),
+            'hotbar.7': to_int_or_zero(action_dict.get('hotbar.7', 0)),
+            'hotbar.8': to_int_or_zero(action_dict.get('hotbar.8', 0)),
+            'hotbar.9': to_int_or_zero(action_dict.get('hotbar.9', 0)),
             'camera': action_dict.get('camera', [0.0, 0.0]),
             'ESC': 0,
         }
-        
+
+        # Ensure camera is numeric
+        cam = minerl_action['camera']
+        try:
+            if isinstance(cam, (list, tuple)):
+                minerl_action['camera'] = [float(cam[0]), float(cam[1])]
+            else:
+                minerl_action['camera'] = [0.0, 0.0]
+        except Exception:
+            minerl_action['camera'] = [0.0, 0.0]
+
         return minerl_action, reasoning
-        
+
     except Exception as e:
         logger.error(f"Error parsing VLM response: {e}")
         logger.error(f"Response text: {response_text}")
-        
+
         # Return a safe default action
         default_action = {
             'attack': 0,
@@ -399,7 +433,7 @@ def parse_vlm_response(response_text: str):
             'camera': [0.0, 0.0],
             'ESC': 0,
         }
-        
+
         return default_action, f"Error parsing response: {str(e)}"
 
 if __name__ == "__main__":

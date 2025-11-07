@@ -82,3 +82,28 @@ Change `FindCave` to other tasks to run for different tasks.
 **Note:** This repository is *not* submittable as-is. You first need to train the models, add them to the git repository and then submit to AICrowd.
 
 To submit this baseline agent follow the [submission instructions](https://github.com/minerllabs/basalt_2022_competition_submission_template/), but use this repo instead of the starter kit repo.
+
+
+## Isaac Setup Notes
+Need to make sure that both the backend qwen model and corresponding container is setup.
+'''
+conda activate FastAPI
+python qwen_policy_server.py
+'''
+And test via
+'''
+python test_qwen_server.py
+'''
+Also make sure minerl environment can be installed via
+'''
+bash setup.sh
+'''
+Be running on a node with at least 20 G vRAM
+Need to activate display
+''' 
+bash setup_display.sh
+'''
+Finally activate mineRL container and run on a separate terminal from the server
+'''
+conda activate minerl
+python qwen_policy_client.py --record-dir Episode_Outputs --max-steps 50
