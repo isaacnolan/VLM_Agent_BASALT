@@ -1,3 +1,4 @@
+#!/bin/bash
 #SBATCH --account=pas3150
 #SBATCH --job-name=minerl_job    # Job name
 #SBATCH --nodes=1 --ntasks-per-node=16
@@ -57,3 +58,4 @@ echo "================================"
 echo "Starting client..."
 echo "================================"
 python qwen_policy_client.py --record-dir Episode_Outputs --max-steps 50
+
