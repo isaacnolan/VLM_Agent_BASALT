@@ -57,5 +57,5 @@ done
 echo "================================"
 echo "Starting client..."
 echo "================================"
-python qwen_policy_client.py --record-dir Episode_Outputs --max-steps 50
+python client/run_agent.py --task-name MineRLBasaltCreateVillageAnimalPen-v0 --record-dir Episode_Outputs --max-steps 50
 
