@@ -14,5 +14,5 @@ python qwen_policy_server.py &
 conda deactivate
 
 bash setup_display.sh
-conda activate minerl
+conda activate /users/PAS2152/eashanvytla1/.conda/envs/minerl
 python qwen_policy_client.py --record-dir Episode_Outputs --max-steps 50
