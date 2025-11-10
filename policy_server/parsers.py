@@ -26,6 +26,7 @@ class VLMResponseParser:
             # Try to extract JSON from the response
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if not json_match:
+                logger.warning(f"No JSON found in VLM response: {response_text[:200]}")
                 raise ValueError("No JSON found in response")
 
             raw_json = json_match.group()
@@ -36,29 +37,54 @@ class VLMResponseParser:
             logger.info(f"Cleaned JSON to parse:\n{clean}")
 
             response_json = json.loads(clean)
+            logger.info(f"Parsed JSON object: {response_json}")
 
             # Extract action and reasoning
             action_dict = response_json.get('action', {})
             reasoning = response_json.get('reasoning', 'No reasoning provided')
+            
+            logger.info(f"Extracted action_dict: {action_dict}")
+            logger.info(f"Extracted reasoning: {reasoning}")
 
             # Create MineRL action format
             minerl_action = create_minerl_action(action_dict)
+            
+            logger.info(f"Final MineRL action: {minerl_action}")
 
             return minerl_action, reasoning
 
         except Exception as e:
             logger.error(f"Error parsing VLM response: {e}")
-            logger.error(f"Response text: {response_text}")
+            logger.error(f"Full response text:\n{response_text}")
             
             # Return a safe default action
-            return get_default_minerl_action(), f"Error parsing response: {str(e)}"
+            default_action = get_default_minerl_action()
+            logger.warning(f"Returning default action due to parse error: {default_action}")
+            return default_action, f"Error parsing response: {str(e)}"
     
     @staticmethod
     def _clean_json(raw_json: str) -> str:
         """Clean up common non-JSON tokens."""
         clean = raw_json
-        # Replace constructs like: "forward": 0 or 1  -> choose 1
-        clean = re.sub(r'(?P<key>"[a-zA-Z0-9_.]+"\s*:\s*)(?:0\s*or\s*1|1\s*or\s*0)', r"\g<key>1", clean)
+        
+        # ONLY replace "0 or 1" if it appears AFTER a colon (in a value position)
+        # AND is followed by a comma or closing brace (not in documentation)
+        # This prevents converting template text like '"forward": 0 or 1' when the VLM copies the template
+        # Only match when it's clearly a malformed value, not when all fields have it
+        
+        # Count how many "0 or 1" or "1 or 0" appear - if too many, VLM probably copied the template
+        or_count = len(re.findall(r':\s*(?:0\s*or\s*1|1\s*or\s*0)', clean))
+        total_fields = len(re.findall(r'"[^"]+"\s*:', clean))
+        
+        # If more than 50% of fields have "or" syntax, the VLM likely copied the template literally
+        # In this case, DON'T auto-convert - return an error instead
+        if total_fields > 0 and or_count / total_fields > 0.5:
+            logger.error(f"VLM appears to have copied the template literally ({or_count}/{total_fields} fields have 'or' syntax)")
+            raise ValueError("VLM returned template format instead of concrete values")
+        
+        # Only clean up occasional "or" syntax (when VLM made a mistake on a few fields)
+        clean = re.sub(r'(?P<key>"[a-zA-Z0-9_.]+"\s*:\s*)(?:0\s*or\s*1|1\s*or\s*0)(?=\s*[,}])', r"\g<key>0", clean)
+        
         # Replace boolean-like words (True/False) with JSON booleans
         clean = re.sub(r"\bTrue\b", "true", clean)
         clean = re.sub(r"\bFalse\b", "false", clean)
