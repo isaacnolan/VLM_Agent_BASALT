@@ -96,7 +96,9 @@ python test_qwen_server.py
 '''
 Also make sure minerl environment can be installed via
 '''
-bash setup.sh
+bash setup.sh 
+or
+bash setup.sh --new-env # If you want to create a new conda env
 '''
 Be running on a node with at least 20 G vRAM
 Need to activate display
