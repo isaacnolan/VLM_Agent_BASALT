@@ -15,7 +15,7 @@ which python
 echo "================================"
 echo "Starting QWEN Policy Server..."
 echo "================================"
-python -u qwen_policy_server.py &
+python -u server/app.py &
 SERVER_PID=$!
 echo "Server started with PID: $SERVER_PID"
 
