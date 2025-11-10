@@ -8,7 +8,7 @@
 #SBATCH --mail-type=BEGIN,FAIL
 
 module load miniconda3/24.1.2-py310
-conda activate FastAPI
+conda activate qwen
 python qwen_policy_server.py &
 
 bash setup.sh
