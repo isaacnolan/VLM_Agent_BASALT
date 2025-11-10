@@ -7,9 +7,10 @@
 #SBATCH --output=minerl_run.log  # Standard output and error log
 #SBATCH --mail-type=BEGIN,FAIL
 
-conda activate qwen
-python qwen_policy_server.py
-python test_qwen_server.py
+module load miniconda3/24.1.2-py310
+conda activate FastAPI
+python qwen_policy_server.py &
+
 bash setup.sh
 bash setup_display.sh
 conda activate minerl
