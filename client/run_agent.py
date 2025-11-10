@@ -47,6 +47,7 @@ def main(task_name, n_episodes=3, max_steps=100, show=False, record_dir=None,
     while not health:
         logger.error("Server is not available! Waiting...")
         sleep(5)
+        health = client.check_health()
     
     logger.info(f"Server Status: {json.dumps(health, indent=2)}")
     
