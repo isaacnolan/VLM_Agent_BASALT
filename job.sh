@@ -11,6 +11,8 @@ module load miniconda3/24.1.2-py310
 conda activate qwen
 python qwen_policy_server.py &
 
+conda deactivate
+
 bash setup_display.sh
 conda activate minerl
 python qwen_policy_client.py --record-dir Episode_Outputs --max-steps 50
