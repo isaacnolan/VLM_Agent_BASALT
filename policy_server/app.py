@@ -8,10 +8,10 @@ It processes visual observations and returns actions in MineRL format.
 from fastapi import FastAPI, HTTPException
 import logging
 from common.models import PolicyRequest, ActionResponse
-from server.model_loader import ModelLoader
-from server.prompt_builder import PromptBuilder
-from server.parsers import VLMResponseParser
-from server.image_processor import ImageProcessor
+from policy_server.model_loader import ModelLoader
+from policy_server.prompt_builder import PromptBuilder
+from policy_server.parsers import VLMResponseParser
+from policy_server.image_processor import ImageProcessor
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
