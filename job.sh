@@ -15,7 +15,7 @@ which python
 echo "================================"
 echo "Starting QWEN Policy Server..."
 echo "================================"
-python -u server/app.py &
+python -u policy_server/app.py &
 SERVER_PID=$!
 echo "Server started with PID: $SERVER_PID"
 
@@ -57,5 +57,5 @@ done
 echo "================================"
 echo "Starting client..."
 echo "================================"
-python client/run_agent.py --task-name MineRLBasaltCreateVillageAnimalPen-v0 --record-dir Episode_Outputs --max-steps 50
+python client/run_agent.py --task MineRLBasaltCreateVillageAnimalPen-v0 --record-dir Episode_Outputs --max-steps 50
 
