@@ -36,6 +36,7 @@ echo "================================"
 echo "Setting up display..."
 echo "================================"
 bash setup_display.sh
+source setup_display.sh
 
 conda activate minerl
 which python
