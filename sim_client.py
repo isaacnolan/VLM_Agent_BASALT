@@ -13,23 +13,35 @@ from PIL import Image
 import io
 import cv2
 import os
+import logging
 from argparse import ArgumentParser
+from collections import deque
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 class QwenPolicyClient:
     """
     Client for interacting with the QWEN VLM Policy Server.
     """
     
-    def __init__(self, server_url="http://localhost:8001"):
+    def __init__(self, server_url="http://localhost:8001", max_history_length=5):
         """
         Initialize the policy client.
         
         Args:
             server_url: URL of the policy server
+            max_history_length: Maximum number of state-action pairs to keep in history
         """
         self.server_url = server_url
         self.step_count = 0
         self.episode_data = []  # Store actions and reasoning for each step
+        self.max_history_length = max_history_length
+        self.hist_context = deque(maxlen=max_history_length)  # History queue of state-action pairs
         
     def check_health(self):
         """Check if the server is healthy and ready."""
@@ -38,13 +50,14 @@ class QwenPolicyClient:
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            print(f"Health check failed: {e}")
+            logger.error(f"Health check failed: {e}")
             return None
     
     def reset(self):
-        """Reset the step counter and episode data."""
+        """Reset the step counter, episode data, and history context."""
         self.step_count = 0
         self.episode_data = []
+        self.hist_context.clear()
     
     def _encode_observation(self, obs):
         """
@@ -82,18 +95,26 @@ class QwenPolicyClient:
         """
         self.step_count += 1
         
-        # Encode observation
+        # Encode current observation
         image_base64 = self._encode_observation(obs)
         
-        # Prepare request
-        payload = {
-            "task_name": task_name,
+        # Add current observation to history (without action yet)
+        current_state = {
             "image": {
                 "data": image_base64
             },
+            "action": None  # Will be filled in after we get the action
+        }
+        self.hist_context.append(current_state)
+        
+        # Prepare request with history
+        payload = {
+            "task_name": task_name,
+            "history": list(self.hist_context),  # Convert deque to list for JSON
             "step": self.step_count,
             "temperature": temperature,
-            "max_tokens": max_tokens
+            "max_tokens": max_tokens,
+            "max_history_length": self.max_history_length
         }
         
         try:
@@ -108,14 +129,21 @@ class QwenPolicyClient:
             # Parse response
             result = response.json()
             
-            # Print reasoning if available
+            # Log reasoning if available
             if 'reasoning' in result:
-                print(f"Step {self.step_count} - Reasoning: {result['reasoning']}")
+                logger.info(f"Step {self.step_count} - Reasoning: {result['reasoning']}")
             
             # Convert camera to numpy array if needed
             action = result['action']
             if isinstance(action['camera'], list):
                 action['camera'] = np.array(action['camera'], dtype=np.float32)
+            
+            # Update the last history entry with the action taken
+            if self.hist_context:
+                self.hist_context[-1]["action"] = action.copy()
+                # Convert numpy array back to list for storage
+                if isinstance(self.hist_context[-1]["action"]['camera'], np.ndarray):
+                    self.hist_context[-1]["action"]['camera'] = self.hist_context[-1]["action"]['camera'].tolist()
             
             # Store action and reasoning for later analysis
             self.episode_data.append({
@@ -127,8 +155,15 @@ class QwenPolicyClient:
             return action
             
         except requests.exceptions.Timeout:
-            print(f"Request timed out at step {self.step_count}")
+            logger.warning(f"Request timed out at step {self.step_count}")
             action = self._get_default_action()
+            
+            # Update history with default action
+            if self.hist_context:
+                self.hist_context[-1]["action"] = action.copy()
+                if isinstance(self.hist_context[-1]["action"]['camera'], np.ndarray):
+                    self.hist_context[-1]["action"]['camera'] = self.hist_context[-1]["action"]['camera'].tolist()
+            
             self.episode_data.append({
                 'step': self.step_count,
                 'action': action.copy(),
@@ -136,8 +171,15 @@ class QwenPolicyClient:
             })
             return action
         except Exception as e:
-            print(f"Error getting action: {e}")
+            logger.error(f"Error getting action: {e}")
             action = self._get_default_action()
+            
+            # Update history with default action
+            if self.hist_context:
+                self.hist_context[-1]["action"] = action.copy()
+                if isinstance(self.hist_context[-1]["action"]['camera'], np.ndarray):
+                    self.hist_context[-1]["action"]['camera'] = self.hist_context[-1]["action"]['camera'].tolist()
+            
             self.episode_data.append({
                 'step': self.step_count,
                 'action': action.copy(),
@@ -197,10 +239,10 @@ class QwenPolicyClient:
         with open(filepath, 'w') as f:
             json.dump(serializable_data, f, indent=2)
         
-        print(f"Saved episode data to {filepath}")
+        logger.info(f"Saved episode data to {filepath}")
 
 
-def main(task_name, n_episodes=3, max_steps=100, show=False, record_dir=None, server_url="http://localhost:8001"):
+def main(task_name, n_episodes=3, max_steps=100, show=False, record_dir=None, server_url="http://localhost:8001", max_history_length=5):
     """
     Run QWEN policy client with optional video recording.
     
@@ -211,6 +253,7 @@ def main(task_name, n_episodes=3, max_steps=100, show=False, record_dir=None, se
         show: Whether to render the environment
         record_dir: Directory to save videos and episode data (None to disable)
         server_url: URL of the QWEN policy server
+        max_history_length: Maximum number of state-action pairs to keep in history
     """
     import aicrowd_gym
     import minerl  # Need to import minerl to register environments
@@ -218,38 +261,38 @@ def main(task_name, n_episodes=3, max_steps=100, show=False, record_dir=None, se
     import traceback
     
     # Initialize client
-    client = QwenPolicyClient(server_url=server_url)
+    client = QwenPolicyClient(server_url=server_url, max_history_length=max_history_length)
     
     # Check server health
     health = client.check_health()
     if health:
-        print("Server Status:", json.dumps(health, indent=2))
+        logger.info(f"Server Status: {json.dumps(health, indent=2)}")
     else:
-        print("Server is not available!")
+        logger.error("Server is not available!")
         return
     
     # Prepare recording directory if requested
     if record_dir:
         os.makedirs(record_dir, exist_ok=True)
-        print(f"Recording to directory: {record_dir}")
+        logger.info(f"Recording to directory: {record_dir}")
     
     # Create environment
     env = aicrowd_gym.make(task_name)
     
-    print(f"\nRunning agent with QWEN policy server on {task_name}")
-    print(f"Episodes: {n_episodes}, Max steps per episode: {max_steps}")
-    print("="*60)
+    logger.info(f"\nRunning agent with QWEN policy server on {task_name}")
+    logger.info(f"Episodes: {n_episodes}, Max steps per episode: {max_steps}")
+    logger.info("="*60)
     
     for ep in range(n_episodes):
-        print(f"\n--- Episode {ep + 1}/{n_episodes} ---")
+        logger.info(f"\n--- Episode {ep + 1}/{n_episodes} ---")
         
         try:
             obs = env.reset()
         except Exception:
             # Provide more context to help debug Malmo/Minecraft startup failures.
-            print("Error during env.reset() - dumping diagnostics:", file=sys.stderr)
+            logger.error("Error during env.reset() - dumping diagnostics:")
             traceback.print_exc()
-            print("Common causes: Java (OpenJDK) missing, Malmo failed to start, X11/Xvfb not available, or permissions issues.", file=sys.stderr)
+            logger.error("Common causes: Java (OpenJDK) missing, Malmo failed to start, X11/Xvfb not available, or permissions issues.")
             raise
         
         client.reset()
@@ -262,7 +305,7 @@ def main(task_name, n_episodes=3, max_steps=100, show=False, record_dir=None, se
             video_path = os.path.join(record_dir, f"episode_{ep:03d}.mp4")
             # OpenCV expects (width, height)
             writer = cv2.VideoWriter(video_path, fourcc, 20.0, (w, h))
-            print(f"Recording video to: {video_path}")
+            logger.info(f"Recording video to: {video_path}")
         
         try:
             for step in range(max_steps):
@@ -286,24 +329,24 @@ def main(task_name, n_episodes=3, max_steps=100, show=False, record_dir=None, se
                         writer.write(frame_bgr)
                     except Exception as e:
                         # best-effort: ignore frame write errors
-                        print(f"Warning: Could not write frame {step}: {e}")
+                        logger.warning(f"Could not write frame {step}: {e}")
                 
                 if done:
-                    print(f"Episode finished at step {step + 1}")
+                    logger.info(f"Episode finished at step {step + 1}")
                     break
         
         finally:
             # Always release writer for this episode, even if interrupted
             if writer is not None:
                 writer.release()
-                print(f"Video saved: episode_{ep:03d}.mp4")
+                logger.info(f"Video saved: episode_{ep:03d}.mp4")
             
             # Save episode data (actions and reasoning)
             if record_dir:
                 client.save_episode_data(record_dir, ep)
     
     env.close()
-    print("\nDone!")
+    logger.info("\nDone!")
 
 
 if __name__ == "__main__":
@@ -321,6 +364,8 @@ if __name__ == "__main__":
                         help="Directory to save episode videos and data (default: None)")
     parser.add_argument("--server-url", type=str, default="http://localhost:8001",
                         help="URL of the QWEN policy server (default: http://localhost:8001)")
+    parser.add_argument("--max-history-length", type=int, default=5,
+                        help="Maximum number of state-action pairs to keep in history (default: 5)")
     
     args = parser.parse_args()
     
@@ -330,5 +375,6 @@ if __name__ == "__main__":
         max_steps=args.max_steps,
         show=args.show,
         record_dir=args.record_dir,
-        server_url=args.server_url
+        server_url=args.server_url,
+        max_history_length=args.max_history_length
     )
