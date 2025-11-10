@@ -14,22 +14,26 @@ import io
 import cv2
 import os
 from argparse import ArgumentParser
+from collections import deque
 
 class QwenPolicyClient:
     """
     Client for interacting with the QWEN VLM Policy Server.
     """
     
-    def __init__(self, server_url="http://localhost:8001"):
+    def __init__(self, server_url="http://localhost:8001", max_history_length=5):
         """
         Initialize the policy client.
         
         Args:
             server_url: URL of the policy server
+            max_history_length: Maximum number of state-action pairs to keep in history
         """
         self.server_url = server_url
         self.step_count = 0
         self.episode_data = []  # Store actions and reasoning for each step
+        self.max_history_length = max_history_length
+        self.hist_context = deque(maxlen=max_history_length)  # History queue of state-action pairs
         
     def check_health(self):
         """Check if the server is healthy and ready."""
@@ -42,9 +46,10 @@ class QwenPolicyClient:
             return None
     
     def reset(self):
-        """Reset the step counter and episode data."""
+        """Reset the step counter, episode data, and history context."""
         self.step_count = 0
         self.episode_data = []
+        self.hist_context.clear()
     
     def _encode_observation(self, obs):
         """
@@ -82,18 +87,26 @@ class QwenPolicyClient:
         """
         self.step_count += 1
         
-        # Encode observation
+        # Encode current observation
         image_base64 = self._encode_observation(obs)
         
-        # Prepare request
-        payload = {
-            "task_name": task_name,
+        # Add current observation to history (without action yet)
+        current_state = {
             "image": {
                 "data": image_base64
             },
+            "action": None  # Will be filled in after we get the action
+        }
+        self.hist_context.append(current_state)
+        
+        # Prepare request with history
+        payload = {
+            "task_name": task_name,
+            "history": list(self.hist_context),  # Convert deque to list for JSON
             "step": self.step_count,
             "temperature": temperature,
-            "max_tokens": max_tokens
+            "max_tokens": max_tokens,
+            "max_history_length": self.max_history_length
         }
         
         try:
@@ -117,6 +130,13 @@ class QwenPolicyClient:
             if isinstance(action['camera'], list):
                 action['camera'] = np.array(action['camera'], dtype=np.float32)
             
+            # Update the last history entry with the action taken
+            if self.hist_context:
+                self.hist_context[-1]["action"] = action.copy()
+                # Convert numpy array back to list for storage
+                if isinstance(self.hist_context[-1]["action"]['camera'], np.ndarray):
+                    self.hist_context[-1]["action"]['camera'] = self.hist_context[-1]["action"]['camera'].tolist()
+            
             # Store action and reasoning for later analysis
             self.episode_data.append({
                 'step': self.step_count,
@@ -129,6 +149,13 @@ class QwenPolicyClient:
         except requests.exceptions.Timeout:
             print(f"Request timed out at step {self.step_count}")
             action = self._get_default_action()
+            
+            # Update history with default action
+            if self.hist_context:
+                self.hist_context[-1]["action"] = action.copy()
+                if isinstance(self.hist_context[-1]["action"]['camera'], np.ndarray):
+                    self.hist_context[-1]["action"]['camera'] = self.hist_context[-1]["action"]['camera'].tolist()
+            
             self.episode_data.append({
                 'step': self.step_count,
                 'action': action.copy(),
@@ -138,6 +165,13 @@ class QwenPolicyClient:
         except Exception as e:
             print(f"Error getting action: {e}")
             action = self._get_default_action()
+            
+            # Update history with default action
+            if self.hist_context:
+                self.hist_context[-1]["action"] = action.copy()
+                if isinstance(self.hist_context[-1]["action"]['camera'], np.ndarray):
+                    self.hist_context[-1]["action"]['camera'] = self.hist_context[-1]["action"]['camera'].tolist()
+            
             self.episode_data.append({
                 'step': self.step_count,
                 'action': action.copy(),
@@ -200,7 +234,7 @@ class QwenPolicyClient:
         print(f"Saved episode data to {filepath}")
 
 
-def main(task_name, n_episodes=3, max_steps=100, show=False, record_dir=None, server_url="http://localhost:8001"):
+def main(task_name, n_episodes=3, max_steps=100, show=False, record_dir=None, server_url="http://localhost:8001", max_history_length=5):
     """
     Run QWEN policy client with optional video recording.
     
@@ -211,6 +245,7 @@ def main(task_name, n_episodes=3, max_steps=100, show=False, record_dir=None, se
         show: Whether to render the environment
         record_dir: Directory to save videos and episode data (None to disable)
         server_url: URL of the QWEN policy server
+        max_history_length: Maximum number of state-action pairs to keep in history
     """
     import aicrowd_gym
     import minerl  # Need to import minerl to register environments
@@ -218,7 +253,7 @@ def main(task_name, n_episodes=3, max_steps=100, show=False, record_dir=None, se
     import traceback
     
     # Initialize client
-    client = QwenPolicyClient(server_url=server_url)
+    client = QwenPolicyClient(server_url=server_url, max_history_length=max_history_length)
     
     # Check server health
     health = client.check_health()
@@ -321,6 +356,8 @@ if __name__ == "__main__":
                         help="Directory to save episode videos and data (default: None)")
     parser.add_argument("--server-url", type=str, default="http://localhost:8001",
                         help="URL of the QWEN policy server (default: http://localhost:8001)")
+    parser.add_argument("--max-history-length", type=int, default=5,
+                        help="Maximum number of state-action pairs to keep in history (default: 5)")
     
     args = parser.parse_args()
     
@@ -330,5 +367,6 @@ if __name__ == "__main__":
         max_steps=args.max_steps,
         show=args.show,
         record_dir=args.record_dir,
-        server_url=args.server_url
+        server_url=args.server_url,
+        max_history_length=args.max_history_length
     )

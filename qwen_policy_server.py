@@ -130,18 +130,90 @@ Keep your reasoning concise and focused on the immediate next action."""
 
 class ImageData(BaseModel):
     data: str  # base64 encoded image
+
+class StateActionPair(BaseModel):
+    """Represents a historical state-action pair"""
+    image: ImageData
+    action: Optional[Dict[str, Any]] = None  # The action taken from this state
     
 class PolicyRequest(BaseModel):
     task_name: str
-    image: ImageData
+    image: Optional[ImageData] = None  # Current image (for backward compatibility)
+    history: Optional[List[StateActionPair]] = None  # History of state-action pairs
     step: Optional[int] = 0
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = 512
+    max_history_length: Optional[int] = 5  # Maximum number of historical frames to include
 
 class ActionResponse(BaseModel):
     action: Dict[str, Any]
     reasoning: str
     step: int
+
+def summarize_action(action: Dict[str, Any]) -> str:
+    """
+    Create a human-readable summary of an action.
+    
+    Args:
+        action: MineRL action dictionary
+        
+    Returns:
+        String summary of the action
+    """
+    parts = []
+    
+    # Movement actions
+    if action.get('forward'):
+        parts.append("moved forward")
+    if action.get('back'):
+        parts.append("moved back")
+    if action.get('left'):
+        parts.append("strafed left")
+    if action.get('right'):
+        parts.append("strafed right")
+    if action.get('jump'):
+        parts.append("jumped")
+    if action.get('sneak'):
+        parts.append("sneaked")
+    if action.get('sprint'):
+        parts.append("sprinted")
+    
+    # Interaction actions
+    if action.get('attack'):
+        parts.append("attacked/mined")
+    if action.get('use'):
+        parts.append("used item/placed block")
+    if action.get('drop'):
+        parts.append("dropped item")
+    if action.get('inventory'):
+        parts.append("opened inventory")
+    
+    # Hotbar selection
+    for i in range(1, 10):
+        if action.get(f'hotbar.{i}'):
+            parts.append(f"selected hotbar slot {i}")
+    
+    # Camera movement
+    camera = action.get('camera', [0.0, 0.0])
+    if isinstance(camera, (list, tuple)) and len(camera) >= 2:
+        h, v = camera[0], camera[1]
+        if abs(h) > 0.5 or abs(v) > 0.5:
+            direction = []
+            if h > 0.5:
+                direction.append("right")
+            elif h < -0.5:
+                direction.append("left")
+            if v > 0.5:
+                direction.append("down")
+            elif v < -0.5:
+                direction.append("up")
+            if direction:
+                parts.append(f"looked {' and '.join(direction)}")
+    
+    if not parts:
+        return "no action"
+    
+    return ", ".join(parts)
 
 @app.on_event("startup")
 async def load_model():
@@ -196,10 +268,10 @@ async def health_check():
 @app.post("/get_action", response_model=ActionResponse)
 async def get_action(request: PolicyRequest):
     """
-    Get an action from the QWEN VLM policy given an observation.
+    Get an action from the QWEN VLM policy given an observation and optional history.
     
     Args:
-        request: PolicyRequest containing task name, base64 encoded image, and optional parameters
+        request: PolicyRequest containing task name, current image or history of state-action pairs, and optional parameters
         
     Returns:
         ActionResponse with the predicted action and reasoning
@@ -215,16 +287,60 @@ async def get_action(request: PolicyRequest):
     logger.info(f"Received policy request for task: {request.task_name}, step: {request.step}")
     
     try:
-        # Decode base64 image
-        try:
-            image_bytes = base64.b64decode(request.image.data)
-            image = Image.open(io.BytesIO(image_bytes))
-            logger.info(f"Decoded image: {image.size}, mode: {image.mode}")
-        except Exception as e:
-            logger.error(f"Failed to decode image: {e}")
+        # Process history or single image
+        images = []
+        history_text = ""
+        
+        if request.history:
+            # Use history mode
+            logger.info(f"Processing history with {len(request.history)} state-action pairs")
+            
+            # Limit history length to avoid token overflow
+            max_len = request.max_history_length or 5
+            history_subset = request.history[-max_len:]
+            
+            # Decode all historical images
+            for idx, state_action in enumerate(history_subset):
+                try:
+                    image_bytes = base64.b64decode(state_action.image.data)
+                    img = Image.open(io.BytesIO(image_bytes))
+                    images.append(img)
+                    
+                    # Build history description
+                    if state_action.action:
+                        # Summarize the action taken
+                        action_summary = summarize_action(state_action.action)
+                        history_text += f"\nStep {request.step - len(history_subset) + idx}: {action_summary}"
+                    else:
+                        history_text += f"\nStep {request.step - len(history_subset) + idx}: (initial state)"
+                        
+                except Exception as e:
+                    logger.error(f"Failed to decode history image {idx}: {e}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid image data in history index {idx}: {str(e)}"
+                    )
+            
+            logger.info(f"Decoded {len(images)} images from history")
+            
+        elif request.image:
+            # Backward compatibility: single image mode
+            logger.info("Processing single image (no history)")
+            try:
+                image_bytes = base64.b64decode(request.image.data)
+                image = Image.open(io.BytesIO(image_bytes))
+                images = [image]
+                logger.info(f"Decoded image: {image.size}, mode: {image.mode}")
+            except Exception as e:
+                logger.error(f"Failed to decode image: {e}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid image data: {str(e)}"
+                )
+        else:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid image data: {str(e)}"
+                detail="Either 'image' or 'history' must be provided"
             )
         
         # Get task-specific prompts
@@ -233,14 +349,60 @@ async def get_action(request: PolicyRequest):
             TASK_PROMPTS["MineRLBasaltFindCave-v0"]
         )
         
-        # Construct prompt
-        text_prompt = f"""Step {request.step}
+        # Construct prompt with history context
+        if history_text:
+            text_prompt = f"""Step {request.step}
+
+{task_config['task_description']}
+
+Recent History:{history_text}
+
+Current observation is shown in the most recent image.
+
+IMPORTANT - Velocity and Obstacle Detection:
+You can estimate velocity from the history of images by observing how the visual scene changes between frames. If you have been taking movement actions (like forward, sprint) but the visual scene shows little to no change between consecutive frames, this indicates a HIGH PROBABILITY of an obstacle blocking your path. In such cases:
+- The lack of visual motion suggests you are stuck or blocked
+- You should IMMEDIATELY take action to maneuver around the obstacle
+- Consider: turning the camera to look around, strafing left/right, jumping, or backing up
+- Avoid continuing the same forward movement that led to being stuck
+
+{ACTION_PROMPT_TEMPLATE}"""
+        else:
+            text_prompt = f"""Step {request.step}
 
 {task_config['task_description']}
 
 {ACTION_PROMPT_TEMPLATE}"""
         
         # Prepare messages for the VLM
+        # Build content with all images
+        content = []
+        
+        # Add all images to content
+        for idx, img in enumerate(images):
+            if len(images) > 1:
+                # Label images in history
+                if idx < len(images) - 1:
+                    content.append({
+                        "type": "text",
+                        "text": f"[Historical Frame {idx + 1}]"
+                    })
+                else:
+                    content.append({
+                        "type": "text",
+                        "text": "[Current Frame]"
+                    })
+            content.append({
+                "type": "image",
+                "image": img,
+            })
+        
+        # Add the main text prompt at the end
+        content.append({
+            "type": "text",
+            "text": text_prompt
+        })
+        
         messages = [
             {
                 "role": "system",
@@ -248,16 +410,7 @@ async def get_action(request: PolicyRequest):
             },
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "image": image,
-                    },
-                    {
-                        "type": "text",
-                        "text": text_prompt
-                    }
-                ]
+                "content": content
             }
         ]
         
@@ -279,7 +432,7 @@ async def get_action(request: PolicyRequest):
         inputs = inputs.to(device)
         
         # Generate response
-        logger.info("Generating action from VLM...")
+        logger.info(f"Generating action from VLM (with {len(images)} image(s))...")
         with torch.no_grad():
             generated_ids = model.generate(
                 **inputs,
