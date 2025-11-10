@@ -4,7 +4,7 @@
 #SBATCH --nodes=1 --ntasks-per-node=16
 #SBATCH --gpus-per-node=1
 #SBATCH --time=1:00:00         # Time limit hrs:min:sec
-#SBATCH --output=minerl_run.log  # Standard output and error log
+#SBATCH --output=logs/minerl_run_%j.log  # Standard output and error log (%j = job ID)
 #SBATCH --mail-type=BEGIN,FAIL
 
 module load miniconda3/24.1.2-py310
